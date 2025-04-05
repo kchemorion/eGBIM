@@ -12,18 +12,28 @@ import seaborn as sns
 from matplotlib.ticker import FormatStrFormatter
 from tqdm import tqdm
 
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+# Import different embedding approaches
 from src.embedding_models import (
     PCAEmbeddingGBImputer,
-    AutoencoderEmbeddingGBImputer,
     SimplifiedTransformerGBImputer,
     HybridEmbeddingGBImputer
 )
 
+# Import transformer-based approach if PyTorch is available
+if TORCH_AVAILABLE:
+    from src.embedding_models import TransformerEmbeddingGBImputer
+
 # Create results directory if it doesn't exist
-os.makedirs('/home/ubuntu/gbim_project/results', exist_ok=True)
+os.makedirs('gbim_project/results', exist_ok=True)
 
 # Create figures directory if it doesn't exist
-os.makedirs('/home/ubuntu/gbim_project/figures', exist_ok=True)
+os.makedirs('gbim_project/figures', exist_ok=True)
 
 # Set random seed for reproducibility
 np.random.seed(42)
@@ -40,11 +50,11 @@ plt.rcParams['ytick.labelsize'] = 12
 plt.rcParams['legend.fontsize'] = 12
 plt.rcParams['legend.title_fontsize'] = 14
 
-# Load a small subset of data for quick comparison
+# Load a subset of data for comparison
 print("Loading data for embedding comparison...")
-df_complete = pd.read_csv('/home/ubuntu/gbim_project/data/synthetic_complete.csv')
-df_missing = pd.read_csv('/home/ubuntu/gbim_project/data/synthetic_mcar_30.csv')
-mask = pd.read_csv('/home/ubuntu/gbim_project/data/synthetic_mcar_30_mask.csv')
+df_complete = pd.read_csv('gbim_project/data/synthetic_complete.csv')
+df_missing = pd.read_csv('gbim_project/data/synthetic_mcar_30.csv')
+mask = pd.read_csv('gbim_project/data/synthetic_mcar_30_mask.csv')
 
 # Use only first 1000 rows for quick comparison
 df_complete = df_complete.iloc[:1000]
@@ -76,10 +86,6 @@ embedding_models = [
         'model': PCAEmbeddingGBImputer(embedding_dim=32, max_iter=2, verbose=True)
     },
     {
-        'name': 'Autoencoder',
-        'model': AutoencoderEmbeddingGBImputer(embedding_dim=16, max_iter=2, verbose=True)
-    },
-    {
         'name': 'Simplified Transformer',
         'model': SimplifiedTransformerGBImputer(embedding_dim=16, n_components=3, max_iter=2, verbose=True)
     },
@@ -88,6 +94,17 @@ embedding_models = [
         'model': HybridEmbeddingGBImputer(embedding_dim=16, max_iter=2, verbose=True)
     }
 ]
+
+# Add transformer-based model if PyTorch is available - just one for testing
+if TORCH_AVAILABLE:
+    transformer_models = [
+        {
+            'name': 'BERT-style',
+            'model': TransformerEmbeddingGBImputer(embedding_dim=16, transformer_type='bert', 
+                                                 num_epochs=3, batch_size=32, max_iter=2, verbose=True)
+        }
+    ]
+    embedding_models.extend(transformer_models)
 
 # Results storage
 results = []
@@ -152,7 +169,7 @@ for model_config in embedding_models:
 results_df = pd.DataFrame(results)
 
 # Save results
-results_df.to_csv('/home/ubuntu/gbim_project/results/embedding_comparison_results.csv', index=False)
+results_df.to_csv('gbim_project/results/embedding_comparison_results.csv', index=False)
 
 print("\nEmbedding Comparison Summary:")
 print(results_df.to_string(index=False))
@@ -171,22 +188,9 @@ ax.yaxis.set_major_formatter(FormatStrFormatter('%.4f'))
 for container in ax.containers:
     ax.bar_label(container, fmt='%.4f', fontsize=10)
 plt.tight_layout()
-plt.savefig('/home/ubuntu/gbim_project/figures/embedding_comparison_rmse.png', bbox_inches='tight', dpi=300)
+plt.savefig('gbim_project/figures/embedding_approach_comparison.png', bbox_inches='tight', dpi=300)
 
-# 2. Imputation Error Comparison (MAE)
-plt.figure(figsize=(12, 8))
-ax = sns.barplot(x='Model', y='Test_MAE', data=results_df)
-plt.title('Imputation Error Comparison (MAE) for Different Embedding Approaches')
-plt.xlabel('Embedding Approach')
-plt.ylabel('Test MAE')
-plt.xticks(rotation=45)
-ax.yaxis.set_major_formatter(FormatStrFormatter('%.4f'))
-for container in ax.containers:
-    ax.bar_label(container, fmt='%.4f', fontsize=10)
-plt.tight_layout()
-plt.savefig('/home/ubuntu/gbim_project/figures/embedding_comparison_mae.png', bbox_inches='tight', dpi=300)
-
-# 3. Downstream Task Performance
+# 2. Downstream Task Performance
 plt.figure(figsize=(12, 8))
 ax = sns.barplot(x='Model', y='Downstream_R2', data=results_df)
 plt.title('Downstream Task Performance (R²) for Different Embedding Approaches')
@@ -197,13 +201,13 @@ ax.yaxis.set_major_formatter(FormatStrFormatter('%.4f'))
 for container in ax.containers:
     ax.bar_label(container, fmt='%.4f', fontsize=10)
 plt.tight_layout()
-plt.savefig('/home/ubuntu/gbim_project/figures/embedding_comparison_r2.png', bbox_inches='tight', dpi=300)
+plt.savefig('gbim_project/figures/downstream_performance_r2.png', bbox_inches='tight', dpi=300)
 
-# 4. Combined metrics plot
+# 3. Combined metrics plot
 plt.figure(figsize=(14, 10))
 metrics = ['Test_RMSE', 'Test_MAE', 'Downstream_R2']
 results_melted = pd.melt(results_df, id_vars=['Model'], value_vars=metrics, 
-                         var_name='Metric', value_name='Value')
+                        var_name='Metric', value_name='Value')
 
 # Normalize values for comparison (min-max scaling)
 for metric in metrics:
@@ -220,7 +224,7 @@ for metric in metrics:
 # Melt the normalized metrics
 normalized_metrics = [f'{m}_Normalized' for m in metrics]
 results_normalized = pd.melt(results_df, id_vars=['Model'], value_vars=normalized_metrics,
-                            var_name='Metric', value_name='Normalized_Value')
+                           var_name='Metric', value_name='Normalized_Value')
 results_normalized['Metric'] = results_normalized['Metric'].str.replace('_Normalized', '')
 
 # Create heatmap of normalized metrics
@@ -229,8 +233,8 @@ plt.figure(figsize=(12, 8))
 ax = sns.heatmap(pivot_table, annot=True, cmap='viridis', fmt='.2f', cbar_kws={'label': 'Performance (higher is better)'})
 plt.title('Normalized Performance Metrics for Different Embedding Approaches')
 plt.tight_layout()
-plt.savefig('/home/ubuntu/gbim_project/figures/embedding_comparison_heatmap.png', bbox_inches='tight', dpi=300)
+plt.savefig('gbim_project/figures/embedding_comparison_heatmap.png', bbox_inches='tight', dpi=300)
 
 print("Embedding comparison plots created successfully!")
-print("Results saved to: /home/ubuntu/gbim_project/results/embedding_comparison_results.csv")
-print("Plots saved to: /home/ubuntu/gbim_project/figures/")
+print("Results saved to: gbim_project/results/embedding_comparison_results.csv")
+print("Plots saved to: gbim_project/figures/")
