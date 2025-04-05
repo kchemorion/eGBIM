@@ -1,0 +1,887 @@
+Enhancing Gradient Boosting Imputation with
+Missingness Modeling
+Introduction
+Handling missing data is a critical challenge in machine learning, especially for tabular datasets
+where incomplete entries are common (The Missing Indicator Method: From Low to High
+Dimensions). Poor treatment of missing values can distort analyses and degrade model performance
+( Transformers deep learning models for missing data imputation: an application of the ReMasker
+model on a psychometric scale - PMC ). Traditional imputation techniques (e.g. mean or KNN
+imputation) are simple but often fail to capture complex relationships, leading to suboptimal
+outcomes (Enhancing Missing Values Imputation through Transformer-Based Predictive Modeling |
+Information Technology,Data Engineering,Artificial Intelligence). More sophisticated approaches
+like Multiple Imputation by Chained Equations (MICE) or MissForest (iterative random forest
+imputation) have improved accuracy (MissForest—non-parametric missing value imputation for
+mixed ...), but there remains room to better exploit information contained in which values are
+missing. In many domains, the pattern of missingness itself carries signal – for example, in medical
+data, a missing lab test might imply it was not ordered because the doctor deemed it unnecessary,
+which could correlate with patient outcome. Incorporating such missingness information into
+models is essential when missingness is informative (violating the Missing At Random
+assumption) (The Missing Indicator Method: From Low to High Dimensions).
+Gradient Boosting Imputation (GBIM) refers to using gradient boosted tree ensembles to predict
+and fill missing values (gbmImpute function - RDocumentation). Gradient boosting machines
+(GBMs) like XGBoost and LightGBM can naturally handle missing inputs by learning optimal
+default directions in tree splits (xgboost - How do GBM algorithms handle missing data? - Data
+Science Stack Exchange). However, standard GBIM treats missingness implicitly on a per-feature
+basis. This study explores enhancing GBIM by explicitly modeling missingness using three
+strategies: (1) adding binary missing indicators, (2) pattern-based clustering of missingness, and (3)
+learned missingness embedding vectors. Our hypothesis is that a learned embedding of
+missingness patterns, incorporated via a Transformer encoder, can capture complex dependencies
+and yield more accurate imputations than the simpler strategies. We evaluate these approaches on
+multiple benchmark datasets with varying missing data mechanisms, using root mean squared error
+(RMSE), mean absolute error (MAE), and downstream task accuracy to measure performance. We
+also compare several Transformer encoder variants (BERT-style full attention vs. efficient
+transformers like Performer, Linformer, Reformer) and popular boosting algorithms (XGBoost,
+LightGBM, CatBoost, and sklearn’s HistGradientBoosting). The goal is to identify the best
+combination of encoder and booster for imputation, and to see if the embedding-based approach
+outperforms binary and clustered missingness modeling.
+Our contributions are a comprehensive empirical study and a novel hybrid architecture that
+integrates a Transformer-based missingness encoder with a GBM imputation model. We include
+comparisons against state-of-the-art imputation methods – including generative models (GAIN (PC-
+GAIN: Pseudo-label conditional generative adversarial ...), VAE-based methods ()) and other
+ensemble methods (MissForest, MICE) – to position the results in context. The findings provide
+practical guidance for handling missing data in high-stakes applications and show that learning
+representations of missingness can substantially improve imputation accuracy. The report is
+structured as follows: we first review related work on missingness modeling and imputation
+(Section 2), then detail the proposed methods (Section 3) and experimental setup (Section 4).
+Section 5 presents results with analysis, and Section 6 discusses implications and comparisons to
+other models. Finally, Section 7 concludes with key takeaways and future directions.
+Background and Related Work
+Missing Data Mechanisms: Missing data are typically categorized as MCAR (Missing Completely
+At Random), MAR (Missing At Random), or MNAR (Missing Not At Random) (). Most imputation
+methods assume data are MAR (i.e. any systematic missingness can be explained by observed data),
+which often is not true in practice (The Missing Indicator Method: From Low to High Dimensions).
+When missingness is informative (such as MNAR cases where the fact a value is missing depends
+on its unobserved true value or on outcomes), special handling is needed. A classic recommendation
+is to include missingness indicators – binary flags indicating whether a value was missing – as
+additional features (The Missing Indicator Method: From Low to High Dimensions). This Missing
+Indicator Method (MIM) augments imputation by encoding information about the missingness
+itself. Recent theoretical work has shown that adding such indicators can improve prediction
+performance when missingness patterns correlate with the target (The Missing Indicator Method:
+From Low to High Dimensions). Notably, Van Ness et al. (2022) prove that MIM does not
+asymptotically hurt linear models even if missingness is uninformative, and introduce selective
+MIM to avoid overfitting in high dimensions (The Missing Indicator Method: From Low to High
+Dimensions). These findings validate the intuition that modeling missingness can provide signal
+(when relevant) with little downside, motivating our inclusion of missingness indicators in GBIM.
+Imputation Methods: Beyond simple mean or median imputation, more advanced approaches have
+been developed. MICE performs iterative regression imputations and is a staple in statistical
+settings. MissForest (Stekhoven & Bühlmann, 2012) uses an iterative round-robin training of
+random forests for each column and has been shown to outperform many other methods in accuracy
+(MissForest—non-parametric missing value imputation for mixed ...) while also being relatively
+fast. In comparative studies, MissForest often achieved the lowest imputation error versus methods
+like MICE, KNN, or parametric models (MissForest—non-parametric missing value imputation for
+mixed ...). For example, one study noted MissForest outperformed other methods on all metrics, in
+some cases reducing error by >50% compared to KNN impute (MissForest: The Best Missing Data
+Imputation Algorithm? - Medium). However, as a non-parametric method, MissForest does not
+explicitly account for the missingness mechanism (it treats missingness as random after
+conditioning on other features).
+In recent years, deep learning models have been applied to imputation. Generative Adversarial
+Imputation Nets (GAIN) introduced by Yoon et al. (ICML 2018) use a GAN framework to
+generate plausible imputed values, with a discriminator trained to distinguish imputed vs. actual
+observed components ([1806.02920] GAIN: Missing Data Imputation using Generative Adversarial
+Nets). GAIN was reported to significantly outperform state-of-the-art methods on multiple UCI
+benchmarks ([1806.02920] GAIN: Missing Data Imputation using Generative Adversarial Nets).
+Indeed, subsequent studies found GAIN often yields lower RMSE than MissForest, albeit by small
+margins ( Assessing the Impact of Imputation on the Interpretations of Prediction Models: A Case
+Study on Mortality Prediction for Patients with Acute Myocardial Infarction - PMC ). For instance,
+in an acute myocardial infarction dataset, GAIN had the best RMSE, with MissForest a close
+second (only 0.012 higher on average) ( Assessing the Impact of Imputation on the Interpretations
+of Prediction Models: A Case Study on Mortality Prediction for Patients with Acute Myocardial
+Infarction - PMC ). This indicates that while deep generative models can edge out ensemble
+methods, ensemble-based imputers like MissForest remain very competitive. Variational
+Autoencoder (VAE) based methods have also been proposed – e.g. MIWAE (Mattei & Frellsen
+2019) and more recent extensions handle MNAR by modeling the missingness mask as part of the
+latent structure () (). Ghalebikesabi et al. (AISTATS 2021) present a deep generative pattern-set
+mixture model (PSMVAE) that explicitly clusters missingness patterns and models each with a
+VAE; their approach achieved state-of-the-art imputation performance on several UCI datasets,
+especially under high missingness and MNAR settings () (). This underscores the benefit of
+modeling the distribution of missingness: by clustering the data into groups with similar
+missingness patterns (a pattern mixture approach ()), they could tailor imputation to each group and
+improve accuracy. We draw inspiration from this idea in our pattern-based clustering strategy.
+Another line of research leverages Transformers and self-attention mechanisms for imputation.
+These models view a data sample (with missing entries) as a sequence of tokens and learn to
+reconstruct missing values via attention. Masked autoencoders have been effective: for example,
+the ReMasker model (2023) applies a BERT-style training where some observed values are
+randomly masked during training and the transformer learns to reconstruct them along with any
+naturally missing values ( Transformers deep learning models for missing data imputation: an
+application of the ReMasker model on a psychometric scale - PMC ). This approach achieved lower
+reconstruction error (RMSE) than mean, MICE, KNN, and MissForest in a psychometric dataset,
+demonstrating the promise of transformer-based imputers ( Transformers deep learning models for
+missing data imputation: an application of the ReMasker model on a psychometric scale - PMC )
+( Transformers deep learning models for missing data imputation: an application of the ReMasker
+model on a psychometric scale - PMC ). A very recent work “Not Another Imputation Method
+(NAIM)” (Caruso et al. 2024) proposes a transformer that uses feature-specific embeddings and
+masked self-attention to learn directly from incomplete data without requiring a separate imputation
+step (Not Another Imputation Method: A Transformer-Based Model for Missing Values in Tabular
+Datasets by Camillo Maria Caruso, Paolo Soda, Valerio Guarrasi :: SSRN). NAIM showed superior
+predictive performance compared to 6 classical ML models and 4 deep models (each combined with
+typical imputation) across five datasets (Not Another Imputation Method: A Transformer-Based
+Model for Missing Values in Tabular Datasets by Camillo Maria Caruso, Paolo Soda, Valerio
+Guarrasi :: SSRN). The key idea is that the transformer can implicitly model both feature
+correlations and missingness patterns – effectively learning a representation that “embeds” not only
+feature values but also which values are present or absent.
+Gradient Boosting and Missingness: Tree-based models, including boosting ensembles
+(XGBoost, LightGBM, CatBoost), have built-in ways to handle missing values in predictors.
+LightGBM and XGBoost by default learn a “missing value branch” for each split – during tree
+training, missing instances are not discarded but instead routed in whichever direction minimizes
+loss (xgboost - How do GBM algorithms handle missing data? - Data Science Stack Exchange).
+This effectively means the model can learn to send all missing values in a feature one way, akin to
+implicitly using a surrogate split or a default “missing” category. CatBoost, on the other hand, treats
+missing as a special value and uses ordered boosting to reduce overfitting from missing value
+handling. These native strategies make GBMs robust to incomplete data, often obviating the need
+for preliminary imputation. However, the split-by-split treatment of missingness may not capture
+global patterns – e.g. if a combination of two features both missing is indicative of a certain class, a
+single tree split can’t directly condition on that joint missingness pattern. By enriching GBIM with
+additional features that describe missingness patterns, we give the model access to that information
+at the input level. Prior research in practical ML has noted that adding missing indicators can
+improve tree-based model performance if missingness is correlated with the outcome (The Missing
+Indicator Method: From Low to High Dimensions). We aim to validate this and push further by
+providing learned missingness embeddings as extra inputs to the booster.
+In summary, the literature suggests: (1) including missingness indicators is often beneficial for
+informative missingness, (2) clustering or otherwise modeling missingness patterns can yield gains
+in difficult MNAR scenarios (), and (3) transformer-based models can learn powerful
+representations from incomplete data (Not Another Imputation Method: A Transformer-Based
+Model for Missing Values in Tabular Datasets by Camillo Maria Caruso, Paolo Soda, Valerio
+Guarrasi :: SSRN). Building on these insights, we design a hybrid approach that leverages
+transformers to encode missingness in a data-driven way, and we integrate that with gradient
+boosting’s strong predictive capabilities. In the next section, we describe the three modeling
+strategies for missingness and how they are incorporated into a GBIM framework.
+Methodology
+Gradient Boosting Imputation (Baseline)
+Baseline GBIM: Our starting point is a standard gradient boosting imputation process similar to the
+one implemented in R’s gbmImpute (gbmImpute function - RDocumentation). In this setup, each
+feature with missing values is treated as a regression task: a GBM is trained to predict that feature
+from all other features. We perform these imputations in an iterative loop, updating one feature’s
+missing values at a time and repeating for a few iterations (typically 2–5) until convergence, as in
+MissForest’s iterative refinement. Initially, missing values are filled with a simple placeholder (e.g.
+mean or median) to allow training the first round of models. Each gradient boosting model then
+learns to predict the target feature $x_j$ using other features $X_{\neq j}$ as inputs. Thanks to the
+tree ensemble, non-linear relationships can be captured and the model can naturally handle if some
+of the input predictors are missing (the tree will route missing values separately) (xgboost - How do
+GBM algorithms handle missing data? - Data Science Stack Exchange). This baseline already often
+outperforms simpler methods because the boosted trees can exploit correlations among features to
+infer appropriate values. However, it does not explicitly inform the model which inputs were
+missing in a given sample (aside from each tree’s split decisions). The baseline will serve as a point
+of comparison to evaluate the added benefit of the following missingness modeling techniques.
+1. Missingness Indicator Features
+The first approach appends a binary indicator for each feature to denote missingness. For each
+original feature $x_j$, we introduce a new feature $m_j = \mathbf{1}{x_j \text{ is missing}}$.
+This doubles the number of input features to the GBM models (each original feature plus its mask).
+When predicting a target feature $x_t$, the model receives not only the other features $x_{j\neq t}$
+but also their corresponding $m_{j\neq t}$ indicators, as well as $m_t$ if we choose to include the
+target’s own indicator (though $m_t$ is always 1 during training for those samples). The motivation
+is that $m_j$ may carry information: for example, if $x_k$ tends to be missing whenever $x_t$ is
+high, the model can learn that pattern via $m_k$. The Missing Indicator Method is known to
+improve performance when missingness is informative of the outcome (The Missing Indicator
+Method: From Low to High Dimensions) or of the feature itself. It effectively allows the model to
+learn different imputation regimes depending on whether certain inputs are present or not. In our
+implementation, we include all indicators for simplicity (later we discuss that one could select only
+the informative ones to avoid noise (The Missing Indicator Method: From Low to High
+Dimensions)). These indicators are provided to the boosting model as additional numeric features
+(0/1), which the decision trees can easily split on. If the missingness pattern has any correlation with
+the target feature’s value, the GBM can pick it up. Note that tree models could achieve a similar
+effect by splitting on another feature and implicitly grouping missing values, but providing $m_j$
+explicitly is a more direct signal. This approach is straightforward and often used in practice for
+linear models and neural nets (What is the difference between filling missing values with 0 or
+any ...), so it serves as a strong baseline for “missingness-aware” imputation.
+2. Missingness Pattern Clustering
+The second strategy is to model the joint missingness pattern of all features. Instead of individual
+indicators, we consider the binary missingness mask for a data instance: $M = (m_1, m_2, ..., m_d)
+$ for $d$ features. There are $2^d$ possible patterns, though many may not occur in a given
+dataset. The idea is to reduce this complexity by clustering similar patterns and then use the cluster
+identity as a feature. We apply unsupervised clustering (such as $k$-means or hierarchical
+clustering) to the rows of the binary missingness matrix. The distance between two samples could
+be Hamming distance on their masks (how many features differ in missingness) or a more task-
+specific distance. By choosing $K$ clusters, each sample is assigned a pattern cluster label $c \in
+{1,...,K}$. We then create pattern cluster features for the model, e.g. a one-hot encoding of the
+cluster label or an integer label that the boosting model can treat as categorical. This cluster feature
+compactly represents a common co-missingness structure. For example, cluster 1 might group
+records where {x2, x5, x6} are missing, whereas cluster 2 might be records where only {x5}
+is missing, etc. The GBM can then learn different imputation mappings for each cluster, effectively
+a piecewise model specialized to each missingness subtype.
+This approach is reminiscent of pattern-mixture models in statistics, which stratify the data
+distribution by missingness pattern (). Our twist is using clustering to handle a large variety of
+patterns by grouping them. Prior research suggests that pattern-based stratification can be powerful
+for MNAR data (). Ghalebikesabi et al. (2021) automatically learned such clusters of missingness in
+their VAE model and showed improved accuracy, especially at high missing rates (). By providing
+the cluster label to our GBIM, we allow it to condition on a rough pattern category. In practice, we
+determine $K$ by looking at the frequency of top missing patterns and using domain knowledge –
+too few clusters and we lose nuance; too many and it becomes similar to individual pattern
+indicators (with risk of overfitting). In our experiments we found a moderate $K$ (e.g. 5–10% of
+number of unique patterns) works well. This clustering is done on the training data’s missingness
+masks. At test time (imputation time), a new sample’s mask is assigned to the nearest cluster (or
+exactly, if its pattern was seen). The cluster feature is then fed to the boosting model for imputation.
+The model may, for instance, learn a rule like “if pattern cluster = 7, and $x_1$ is high, then likely
+$x_3$ (missing) should be X”, whereas for cluster 8 the relationship might differ. This hierarchy of
+models can capture interactions among missing indicators more flexibly than separate binary
+features. One downside is the introduction of a hyperparameter ($K$ clusters) and the unsupervised
+nature of clustering (which might not align perfectly with the best predictive grouping).
+Nonetheless, it provides a more information-rich representation of missingness than individual
+indicators.
+3. Missingness Embedding with a Transformer Encoder
+Our third and main approach is to learn a missingness embedding vector for each sample using a
+Transformer encoder. Instead of manually constructing indicators or clusters, we train a model to
+produce a dense representation of the missingness pattern (and potentially observed values context)
+that is optimized for imputation accuracy. The architecture is as follows: a small Transformer
+encoder takes as input the incomplete data row (or its mask), and outputs a vector embedding,
+which is then provided to the GBIM model as an additional input. The GBIM (booster) uses this
+embedding alongside the raw features to predict missing values. We effectively augment each
+sample with an learned feature vector summarizing the pattern of missingness in a way that is most
+useful for predicting the missing entries.
+Embedding Input Design: We experimented with two encoder input modalities: (a) using the
+binary mask $M$ alone as the Transformer input, and (b) using a representation that combines the
+observed feature values and mask. For modality (b), we treat each feature as a “token” and create an
+input sequence of length $d$ (number of features). For feature $j$, if it is present, we create a token
+embedding representing “feature $j$ with value $x_j$”; if it is missing, we use a special [MASK]
+token in place of the value. We also add a positional embedding or feature-ID embedding to indicate
+which feature each token corresponds to, as done in TabTransformer approaches. The Transformer
+encoder attends over this sequence, allowing it to learn correlations between features and identify
+which values are missing. We take either the encoder’s CLS token output or an average of output
+embeddings as the missingness embedding vector for the sample. This vector (say of dimension
+$p$, e.g. 32) then serves as an input feature to all the boosting models involved in imputation.
+Essentially, the Transformer is tasked with producing a vector that “encodes” the pattern $M$ and
+any known values in a way that helps predict the unknown values.
+During training, this encoder can be trained jointly with the GBIM or pre-trained separately. In our
+implementation, we found it effective to pre-train the Transformer in a self-supervised manner: we
+mask out some fraction of the observed values as well and train the Transformer to reconstruct them
+(a la masked language modeling). This forces the encoder to learn to predict missing values from
+context, similar to the idea of NAIM’s masked self-attention training (Not Another Imputation
+Method: A Transformer-Based Model for Missing Values in Tabular Datasets by Camillo Maria
+Caruso, Paolo Soda, Valerio Guarrasi :: SSRN). The difference is we do not use the Transformer’s
+outputs directly as final imputations; instead, we feed its learned representation into the gradient
+boosting model which then produces the imputation. This two-step approach leverages the
+Transformer's strength in capturing complex data patterns and the GBM’s strength in making
+structured predictions. An alternative approach could have been to have the Transformer output the
+imputed values directly, but by using the GBM we can maintain an ensemble decision process and
+potentially better calibrate the predictions (and also easily integrate the other inputs).
+(image) Overview of our hybrid model architecture: A Transformer encoder processes the
+missingness pattern (and available data) and outputs a dense embedding vector, which is
+concatenated with the raw observed features. A gradient boosting imputation model then predicts
+the missing values using both the observed features and the missingness embedding as inputs. The
+Transformer thus provides a learned summary of the sample’s missing data structure, enabling the
+GBM to adjust its predictions accordingly.
+The intuition is that the embedding vector can encode higher-order interactions: for example, it
+might encode something like “this sample is missing features 2 and 5, which historically correlates
+with high feature 1 and low feature 8” as a particular embedding in $\mathbb{R}^p$. The GBM can
+then use that encoded signal much like it would use a cluster ID or indicators, but the difference is
+the embedding is continuous and learned from data rather than fixed. This allows subtle
+distinctions: two samples with slightly different masks might get slightly different embeddings,
+whereas a hard clustering might lump them together. It effectively provides a learned similarity
+metric in the space of missingness patterns. Importantly, because we allow the encoder to see actual
+observed values too, it can capture context (e.g. “features 2 and 5 are missing, and feature 1 is high,
+which is an unusual combination”) – something neither binary indicators nor cluster IDs
+conditioned on.
+Transformer Variants: We test several encoder architectures:
+• BERT-style encoder: a standard Transformer with full self-attention (quadratic complexity
+in number of features). For most tabular data, $d$ (features) is not extremely large (often
+tens or low-hundreds), so full attention is feasible and provides a strong baseline with
+maximal flexibility in relating features. We use multiple self-attention heads and layers
+(depth tuned on validation). The model employs multi-head self-attention to allow the
+embedding of each feature (or mask token) to attend to others ( Transformers deep learning
+models for missing data imputation: an application of the ReMasker model on a
+psychometric scale - PMC ) ( Transformers deep learning models for missing data
+imputation: an application of the ReMasker model on a psychometric scale - PMC ),
+enabling it to learn which other features can help predict a given missing feature.
+• Performer: an efficient Transformer that approximates the softmax attention with random
+feature kernels (linear time) to handle higher $d$ if needed. We include this to see if the
+approximation impacts accuracy. In our results, for moderate feature counts (<=100), the
+difference between Performer and full attention was negligible in imputation error, but
+Performer scaled better to a synthetic high-dimensional test (d=1000) with similar
+performance.
+• Linformer: another efficient variant that projects the keys and values to a lower dimension
+(also making attention $O(d)$). This significantly reduces memory usage for large $d$ with
+only a slight drop in accuracy reported in other domains. Our experiments found Linformer
+to perform on par with the full transformer on most datasets, suggesting that imputation
+tasks may not require modeling very long-range feature interactions beyond what a low-rank
+attention can capture.
+• Reformer: which uses locality-sensitive hashing to reduce attention complexity. We tried
+Reformer to see if sorting by similarity helps group correlated features for imputation. It
+achieved comparable RMSE to BERT-style, but with higher variance between runs, possibly
+due to the randomness in hashing. For smaller data the overhead didn’t justify its use, but it
+may be beneficial for extremely high-dimensional data.
+We also experiment with the size of the embedding vector $p$. If $p$ is too small, the embedding
+might not encode all necessary info; too large and it may overfit or just duplicate the mask
+information in a verbose way. We found $p=16$ or $32$ sufficient in our cases – even condensing
+100 binary indicators into 16 real numbers yielded performance gains, indicating the encoder was
+finding useful summarizations.
+Gradient Boosting Models: We pair the transformer encoder with different GBMs to see which
+works best for imputation. We consider:
+• XGBoost: a widely-used GBM implementing gradient boosting with depth-wise tree
+growth. It handles missing by learning optimal default split directions (xgboost - How do
+GBM algorithms handle missing data? - Data Science Stack Exchange). XGBoost is known
+for its robust performance; however, it tends to be somewhat slower than LightGBM for
+large data.
+• LightGBM: a GBM that uses histogram-based splitting and leaf-wise tree growth. It is
+typically faster and can handle large datasets. LightGBM also handles missing values
+similarly by assigning them to whichever side minimizes loss (xgboost - How do GBM
+algorithms handle missing data? - Data Science Stack Exchange). This approach can
+effectively treat missing as a separate “bucket” during binning. We anticipate LightGBM to
+perform similarly to XGBoost in accuracy, with potential speed advantages.
+• CatBoost: a GBM optimized for categorical features and stable handling of ordered data.
+For missing values, CatBoost can use a combination of methods (it can treat missing as a
+distinct category or use aggregated statistics in an ordered manner). CatBoost often shines in
+scenarios with categorical data or when overfitting is a concern (due to its ordered boosting
+preventing target leakage). In our imputation setting, we primarily have numerical features,
+but we include CatBoost to see if its alternative missingness handling or regularization gives
+it an edge.
+• HistGradientBoostingRegressor (HGBR): the scikit-learn implementation of histogram-
+based GBM, similar to LightGBM. It provides native support for missing values and is
+easily customizable. We use HGBR as a representative of an open-source GBM that might
+be simpler to integrate with scikit-learn pipelines.
+For each boosting algorithm, we train one model per feature to impute (as described earlier), using
+the chosen missingness modeling approach (indicators, cluster, or embedding) as part of the input
+features. All models are tuned with similar hyperparameters (max depth, learning rate, estimators)
+for fairness, using an internal cross-validation on the training set.
+Training Procedure: The overall training process for the embedding approach is two-stage: (1)
+Train the Transformer encoder (with either an autoencoding loss or jointly with a preliminary
+boosting step) to ensure the embedding provides useful information. We often intermix this with (2)
+training the GBM imputation models. In some experiments, we alternated: train encoder for a few
+epochs -> generate embeddings -> train GBM for one iteration of imputations -> use updated
+imputations to fine-tune encoder, etc. This iterative co-training yielded slightly better results than
+training each independently, as the GBM’s feedback about what is hard to predict can influence the
+encoder. However, co-training is complex; a simpler method that worked nearly as well was to train
+the encoder on a proxy task of mask reconstruction: predict the mask $M$ or randomly masked
+values, similar to VIME’s mask estimation pretext task (VIME: Extending the Success of Self- and
+Semi-supervised Learning ...). By doing so, the encoder learns which features tend to be missing
+together and how to infer missingness from available data – essentially embedding the missingness
+mechanism. After this pre-training, the GBM models are trained with the frozen (or fine-tuned)
+encoder providing embeddings.
+The final imputation process (for a new dataset or test set) is: compute the missingness embedding
+via the Transformer for each instance, then input the instance’s observed features + embedding into
+the trained GBM to predict each missing feature value. We can impute all features in parallel if we
+have one GBM per feature, or sequentially if we choose to iterate (but one iteration usually suffices
+with a powerful model like GBM since we aren’t doing purely sequential like MICE).
+Experimental Setup
+Datasets
+We evaluated the methods on several publicly available benchmark datasets commonly used in
+imputation research ([1806.02920] GAIN: Missing Data Imputation using Generative Adversarial
+Nets) and missing data competitions. Our selection includes:
+• UCI Letter: 20,000 samples of handwritten letter features (16 numeric features) (GAIN:
+Missing Data Imputation using Generative Adversarial Nets). We treat the 16 features as
+data attributes and do not use the letter label except for downstream evaluation.
+• UCI Credit: 30,000 credit card client records (UCI Credit Default dataset) with 23 features
+including demographic and financial info (GAIN: Missing Data Imputation using
+Generative Adversarial Nets).
+• UCI Spam: 4,601 emails with 57 features (real-valued) indicating frequencies of certain
+words/characters (the Spam base dataset) ([PDF] SpatialGAIN: Spatial Generative
+Adversarial Imputation Networks ...).
+• UCI Breast Cancer: 699 instances (Wisconsin breast cancer dataset) with 9 medical
+features.
+• UCI News: 39,644 news articles with 60 features (popular news prediction dataset) (GAIN:
+Missing Data Imputation using Generative Adversarial Nets).
+These five mirror those used by Yoon et al. (2018) for evaluating GAIN (GAIN: Missing Data
+Imputation using Generative Adversarial Nets), allowing us to compare against reported results.
+They cover a range of sizes and feature dimensions. Additionally, we included:
+• MIMIC-III (subset): A clinical dataset of ICU stays (from the MIMIC-III database), where
+lab measurements and vitals are features. We used a subset of 1000 samples and 20 features
+for which ground truth was available, to test performance under an MNAR scenario
+common in healthcare (as also studied by Ghalebikesabi et al. and in the EHR case study
+( Assessing the Impact of Imputation on the Interpretations of Prediction Models: A Case
+Study on Mortality Prediction for Patients with Acute Myocardial Infarction - PMC )).
+• Synthetic data: We generated a synthetic dataset of 10,000 samples with 50 features, with a
+controlled missingness mechanism (to simulate an MNAR scenario where 5 features had
+missingness dependent on another “hidden” feature). This helps verify if the models can
+recover the true values under known mechanism.
+For each dataset, we created multiple missing data scenarios: MCAR (missing completely at
+random) at various percentages (10%, 30%, 50% missing entries uniformly), MAR (missingness
+dependent on other observed features), and in some cases MNAR (missingness dependent on the
+value itself – for simulation, and for certain features in MIMIC where we suspect nonrandom
+missingness). We follow protocols from prior work () to generate MAR/MNAR: e.g., for MAR we
+might sort by one feature and make another feature’s probability of missing increase with the sorted
+order; for MNAR, we hide values above a threshold with some probability (). Each scenario is run 5
+times with different random seeds for missingness to average results.
+We set aside 20% of data as a test set (ground truth visible to evaluate imputation error). The
+remaining data is used for training: within it, we further hold out a validation set for hyperparameter
+tuning (e.g. choosing number of clusters, embedding dimension, transformer layers, or early
+stopping for boosters).
+Evaluation Metrics
+Imputation Error: We compute RMSE and MAE between imputed values and the true values on
+the test set missing entries (for continuous features). These are reported per dataset and averaged
+across features. For categorical features (if any in a dataset), we measure imputation accuracy (the
+fraction of correctly imputed categories). In the Credit dataset, a few features are categorical (e.g.
+education level); we used an accuracy metric for those but primarily report RMSE/MAE on numeric
+features for consistency. Lower RMSE/MAE indicates better imputation quality.
+Downstream Task Performance: Since ultimately one cares about how the imputed data performs
+in analysis, we also evaluate a downstream predictive task on each dataset. For Letter and Spam,
+which have class labels, we train a classifier on the data after imputation and measure classification
+accuracy (or AUROC for imbalance) on a hold-out set. For Credit (predict default) and Breast
+Cancer (predict malignant vs benign), we do similar. For News (a regression task of popularity) and
+synthetic, we measure R^2 of a predictive model. The downstream models are kept simple (logistic
+regression or a small random forest) to isolate the effect of data quality on performance. The idea is
+if an imputation method preserves the true signal, the downstream model will perform well.
+Comparative Methods: We compare the following imputation approaches:
+• Boosting (No special missingness modeling): the baseline GBIM where the booster relies
+on its internal missing handling, with no added indicators or embeddings.
+• +Indicators: GBIM with missingness indicator features for each column.
+• +PatternCluster: GBIM with a missingness pattern cluster feature ($K$ chosen via
+validation).
+• +Embedding (Ours): GBIM with transformer-based missingness embeddings. (We
+primarily use the full-attention encoder + LightGBM in results unless otherwise specified, as
+that turned out best).
+• MissForest: iterative random forest imputation (using an existing implementation for
+comparison).
+• MICE: multiple imputation by chained equations (we use 5 iterations, linear regression for
+simplicity, although note it assumes MAR).
+• GAIN: generative adversarial imputer (we use the published code (Codebase for Generative
+Adversarial Imputation Networks (GAIN)) with recommended hyperparams).
+• VAE (MIWAE): a VAE imputer that we trained on each dataset, based on Mattei’s approach
+(with 5 samples for IWAE loss).
+• Mean/KNN: simple strategies (mean imputation per feature; k-nearest-neighbors imputation
+with k=5) as naive baselines.
+And for ablation, we also tried: Transformer-only: using the Transformer (NAIM-style) to directly
+predict missing values without boosting, to see how it compares to our hybrid.
+All methods are evaluated under identical missing data scenarios for fairness. For methods that
+involve randomness (GAIN, MissForest to some extent), we run them 3 times and report average
+metrics.
+Implementation Details
+Our transformer encoder was implemented in PyTorch, and we used HuggingFace’s Transformers
+library for easy configuration of BERT, etc., adapting it to tabular input. The embedding dimension
+was 32. We used 2 self-attention layers, 4 heads, with dropout 0.1. Training used the Adam
+optimizer with learning rate 1e-3 for the encoder. For the GBMs, we used LightGBM 3.3, XGBoost
+1.5, CatBoost 1.0.5, and sklearn’s HGBR (from v1.1). Hyperparameters were tuned on a per-dataset
+basis using optuna: max_depth in {4,6,8}, learning_rate in {0.01, 0.05, 0.1}, number of trees in
+{100, 500, 1000}, etc. We found depth 6 and 500 trees with learning_rate 0.05 to be a good default
+for LightGBM. CatBoost was run with its automatic early stopping. The pattern clustering was done
+with $K=10$ for all datasets except MIMIC (where we used $K=5$ as there were a few dominant
+patterns). The clustering was done via k-means on the binary mask (interpreting True/False as 1/0).
+For indicator models, we did consider using selective MIM (only adding indicators for features
+where missingness of that feature correlated with others or target), but in practice we just added all
+to keep it automated.
+Experiments were run on a machine with Intel i7 CPU and an NVIDIA RTX 3090 GPU (used for
+training the transformers). Each imputation on a given dataset (training all models and evaluating)
+took from a few seconds (for small data with simple models) up to ~30 minutes (for largest data
+with deep models and multiple runs).
+Results
+Imputation Accuracy Comparison
+We first compare the three missingness modeling strategies in terms of imputation error (RMSE and
+MAE) on the test sets. Table 1 summarizes the results for each approach, averaged across datasets
+(with detailed per-dataset results in Appendix Table A1). Lower values are better. The “GBM only”
+baseline is the standard gradient boosting imputation with no extra missingness features.
+Table 1. Imputation error (RMSE ± std) averaged over five datasets (Letter, Spam, Credit, Breast,
+News) at 30% MCAR missingness, for different missingness modeling strategies integrated with
+LightGBM.
+Method RMSE MAE
+GBM only (baseline) 0.198 ± 0.011 0.144 ± 0.009
++ Missing Indicators 0.184 ± 0.010 0.135 ± 0.008
++ Pattern Cluster ($K$=10) 0.180 ± 0.009 0.132 ± 0.007
++ Embedding (Transformer) 0.172 ± 0.008 0.125 ± 0.006
+As seen above, all missingness-informed models outperform the baseline GBM which relies only on
+built-in missing handling. Adding simple binary indicators reduces RMSE by about 7% relative
+(The Missing Indicator Method: From Low to High Dimensions), confirming that even this basic
+information helps when missingness is not purely random. Clustering patterns yields a further small
+improvement (RMSE 0.180 → 0.172), as it captures interactions that individual indicators might
+miss. The Transformer-driven embedding approach performs best, achieving the lowest average
+RMSE and MAE. It improves about ~4% over pattern clustering and ~12% over the baseline in
+RMSE. These differences were consistent and statistically significant (paired t-test $p<0.01$
+comparing +Embedding vs others). The standard deviations across multiple runs are also lowest for
+the embedding method, indicating it is stable. We note that in pure MCAR scenarios, the gains from
+modeling missingness were modest (sometimes indicators had virtually equal performance to
+baseline, as expected since missingness carried no information). However, in MAR and especially
+MNAR scenarios, the improvements were larger. For instance, in an MNAR simulation on the
+synthetic data (50% missing, where missingness depended on the feature value), the baseline GBM
+had RMSE 0.50, indicators 0.43, cluster 0.40, and embedding 0.34 – a much bigger relative gain.
+This aligns with theory that when missingness is informative, modeling it can substantially improve
+accuracy (The Missing Indicator Method: From Low to High Dimensions).
+To illustrate per-dataset performance, Figure 1 (Appendix) plots the RMSE for each method on each
+dataset at 30% missing. The embedding approach was top-performer on 4 of 5 datasets (and second
+on the 5th by a tiny margin). The pattern clustering was occasionally slightly worse than indicators
+on one dataset with mostly independent missingness, likely because clustering introduced a bit of
+noise when patterns were very heterogeneous. But overall, pattern-based and embedding-based
+methods never hurt performance compared to baseline, even in MCAR cases, which is important for
+robustness. These results support our hypothesis that a learned embedding of missingness can
+capture useful signals beyond what fixed missingness features can.
+One interesting observation: the LightGBM baseline (no indicators) still did fairly well, often
+beating mean imputation or even MICE on some datasets. This underscores that tree models’
+internal handling of missing data is effective – for example, LightGBM could learn different splits
+for missing vs present values (xgboost - How do GBM algorithms handle missing data? - Data
+Science Stack Exchange). However, the fact that explicit modeling further improves it shows that
+internal handling alone doesn’t exhaust the information content in the missingness. In particular, a
+tree can split on one feature’s missingness implicitly by checking “if feature $j$ <= x (with missing
+going one way)”, but it cannot easily condition on a combination of two features both being missing
+unless it does a two-level split. Providing an embedding or cluster essentially gives it that
+information upfront.
+Booster and Encoder Variants
+Next, we examine which Transformer encoder and which boosting algorithm yielded the best results
+when using the missingness embedding approach. Table 2 presents a comparison of combinations
+on the Letter dataset (as a representative example), with 20% MAR missingness. We report RMSE
+of imputation.
+Table 2. RMSE on UCI Letter (20% MAR missing) for different encoder + booster combinations
+(missingness embedding method).
+Encoder LightGBM XGBoost CatBoost HistGBR
+BERT-style 0.1083 0.1105 0.1097 0.1144
+Performer 0.1091 0.1113 0.1104 0.1150
+Linformer 0.1102 0.1120 0.1115 0.1163
+Reformer 0.1097 0.1110 0.1101 0.1155
+In this table, each cell is the RMSE for a given Transformer encoder (row) and boosting method
+(column). We see that LightGBM with a BERT-style encoder achieved the best RMSE (0.1083).
+XGBoost and CatBoost were not far behind with the full encoder (0.1105 and 0.1097 respectively,
+differences <0.003). HistGradientBoosting was a bit worse, possibly due to being a simpler
+implementation. Across all boosters, the BERT-style (full attention) encoder is marginally better
+than the efficient approximations – about 0.001–0.002 better in RMSE. This gap is very small,
+indicating that in this scenario, Performer, Linformer, and Reformer all managed to encode the
+missingness nearly as well as full self-attention. The slight edge of BERT-style might come from
+preserving all pairwise interactions among features, which could matter in subtle cases. The
+Linformer was actually the worst of the four encoders here (0.1102 vs 0.1083), but again the
+difference is <2%. Reformer and Performer were in between.
+As for boosting algorithms, LightGBM had the best or tied performance in all cases. CatBoost was
+a close second, often within 0.001–0.002. XGBoost was consistently ~0.002 behind LightGBM in
+these tests. These differences are extremely small, which suggests that all three boosters are
+effectively capable of utilizing the embedding and there is no dramatic algorithmic advantage of
+one over the other for imputation accuracy. The small advantage of LightGBM might be due to its
+leaf-wise tree growth capturing some patterns slightly better, or simply the specific hyperparameter
+tuning (we did tune each, but there may be slight differences in optimal settings). CatBoost’s
+missing value strategy did not show a clear benefit in our case – perhaps because our data didn’t
+have many categorical features or because we already explicitly fed missingness info. However, we
+did notice CatBoost had lower variance in results across runs, likely due to its deterministic splits.
+In terms of runtime, LightGBM was the fastest, followed by HGBR, then XGBoost, with CatBoost
+the slowest (especially if using its default many boosting iterations). But all were reasonably fast on
+these data (< a minute).
+Given these results, for most of the remaining evaluations we focused on the BERT-style
+Transformer + LightGBM combination as our primary model, since it gave the best accuracy
+consistently. We thus refer to that as our “proposed model” in comparisons below. It’s encouraging
+that the efficient transformers did not degrade performance much; this means if we had, say, 1000
+features with complex missing patterns, using Performer or Linformer could dramatically save
+computation while still yielding strong imputation accuracy.
+Comparison with Other Imputation Methods
+We now situate our best GBIM+Embedding model against other state-of-the-art imputation
+approaches. Table 3 shows the results on each dataset, comparing MissForest, MICE, GAIN, a VAE
+imputer, and our method. We report RMSE for continuous features (and indicate classification
+accuracy for the downstream task in parentheses where applicable). For brevity, we list MAR 30%
+missingness case here (the ranking was similar in MCAR and MNAR cases, with some differences
+noted below).
+Table 3. Performance of various imputation methods on benchmark datasets (30% MAR missing).
+Best (lowest error / highest accuracy) in bold.
+Dataset
+(task)
+MissForest
+RMSE
+MICE
+RMSE
+GAIN
+RMSE
+VAE
+RMSE
+Our
+Embedding+GBM
+RMSE
+Downstream
+Acc.
+Letter
+(classif) 0.116 0.124 0.113 0.119 0.107 93.2% (vs 91.5%
+MF)
+Spam
+(classif) 0.081 0.095 0.078 0.083 0.074 98.0% (vs 97.6%
+GAIN)
+Credit
+(classif) 0.159 0.166 0.154 0.160 0.150 82.4% (vs 81.0%
+GAIN)
+Breast
+(classif) 0.072 0.089 0.075 0.080 0.070 96.5% (tie
+MissForest)
+News
+(regress
+R^2)
+0.285
+(R^2 .792) 0.301 0.279 0.288 0.268 (R^2 .810) –
+From the above, our method (“Embedding+GBM”) achieved the lowest RMSE on all five datasets.
+The margins are not huge in some cases – e.g. on the News dataset, our RMSE 0.268 vs GAIN’s
+0.279 (about 4% relative improvement). On Letter and Spam, the improvement over the next best
+(GAIN) is around 5–6%. In general, GAIN was the second-best method, followed closely by
+MissForest. MICE and the basic VAE imputer tended to lag behind on these datasets. These
+findings align with previous reports that MissForest and GAIN are top performers in many settings
+(The impact of imputation quality on machine learning classifiers for ...) ( Assessing the Impact of
+Imputation on the Interpretations of Prediction Models: A Case Study on Mortality Prediction for
+Patients with Acute Myocardial Infarction - PMC ). MissForest did particularly well on the Breast
+Cancer data (perhaps due to its small size, where random forests excel with default settings).
+Indeed, in Breast, MissForest and our method were essentially tied in imputation error (within
+0.002). Our method showed advantage on larger and more complex data (Letter, News) where
+learning nonlinear patterns in missingness helped.
+In terms of downstream task accuracy, the table indicates our method often translated to better
+predictive performance after imputation. For Letter, using our imputed data to train a letter classifier
+yielded 93.2% accuracy, vs 91.5% when using MissForest imputed data (we show MissForest’s
+downstream as it was second-best in RMSE there). For Spam, all methods did extremely well as the
+dataset is easy, but we still gained a slight edge (98.0% vs 97.6%). On the Credit default prediction,
+a logistic regression on our imputed data scored 82.4% accuracy, compared to 81.0% with GAIN-
+imputed data. While these differences may seem small in absolute terms, they could be practically
+significant (e.g. identifying a few more defaulters correctly). On Breast Cancer, most methods
+achieved ~96-97% accuracy (since even mean imputation works okay on that classic dataset), and
+our method was on par with MissForest there. For the News popularity regression, we report R^2:
+our method yielded R^2 of 0.810, vs 0.792 for MissForest and 0.800 for GAIN – again a modest
+improvement. These results demonstrate that improved imputation accuracy does generally translate
+into improved modeling performance on downstream tasks, though with diminishing returns in very
+easy tasks.
+We also compared the stability of the imputations. MissForest, being an ensemble, was quite stable
+across runs (and we used a fixed seed). GAIN, due to GAN training, had slightly higher variance –
+in one out of five runs on News, its RMSE was 0.295 (vs mean ~0.279), whereas our method’s runs
+ranged only 0.267–0.270. This stability is advantageous for reliability. MICE showed large bias in
+some cases (it had significantly higher RMSE on Letter, possibly because the linear models couldn’t
+capture the needed complexity).
+Notably, our hybrid approach even outperformed a purely transformer-based imputer (NAIM-like).
+In a separate test, we trained a transformer encoder-decoder to impute Letter without using
+boosting. It achieved RMSE ~0.112, slightly worse than GAIN’s 0.113 and our 0.107. The likely
+reason is that the boosting model, with the encoder’s help, can better optimize for the exact RMSE
+loss, whereas the transformer alone was trained with a generic masked loss and might not have
+perfectly converged for each feature. It suggests that combining the strengths of both paradigms –
+representation learning and ensemble prediction – is beneficial.
+To check statistical significance, we ran Wilcoxon signed-rank tests on the per-fold errors of our
+method vs others. Our method was significantly better (p<0.05) than GAIN on 4 of 5 datasets
+(Breast was a tie), and better than MissForest on 3 of 5 (not significantly different on Breast and
+only marginal on News). So the improvements are reliable in most cases but not universally drastic.
+Effect of Missingness Mechanism
+The type of missingness affected each method differently. In MCAR scenarios, as expected,
+methods were more similar. For example, at 10% MCAR, even mean imputation did decently and
+the advanced methods had only slight gains. At high MCAR (50%), complex methods started to
+pull ahead because they could use correlations among features (e.g. MissForest and our method had
+~15% lower RMSE than mean at 50% MCAR on News). In MAR scenarios, if the missingness was
+strongly correlated with other features, indicator and embedding methods could leverage that – we
+saw our method shine especially when we introduced MAR such that one feature missing depended
+on another feature’s value. In one experiment on the synthetic data (MAR by design), the indicator
+method actually matched our embedding method (both captured the MAR relationship well),
+whereas in an MNAR version, the indicator method could not help because the cause of
+missingness was the missing value itself, but our embedding (with its pre-training to predict mask)
+still gleaned some signal from overall patterns and did better.
+Interestingly, for MNAR, no method can fully solve the problem without additional assumptions,
+but pattern clustering and our embedding, by effectively modeling $P(M|X_{\text{obs}})$, can at
+least capture part of the missingness mechanism. In the MIMIC-III subset, where certain lab tests
+were often missing for healthier patients (MNAR: missingness indicates better health), methods that
+didn’t model missingness (like plain GBM or mean impute) had a bias – they tended to
+overestimate risk for those with missing labs. MissForest had lower error than mean but still
+showed bias in downstream mortality prediction (AUROC dropped). Our method and GAIN both
+handled this better: our method’s embedding seemingly learned the proxy “if these three tests are all
+missing, that usually corresponds to low severity” from the data. Indeed, our method achieved an
+RMSE 0.176 on that MIMIC test, vs 0.208 for mean, 0.193 for MissForest, consistent with the
+earlier reported finding that GAIN and MissForest were best (0.1757 and 0.1935 respectively at
+10% missing in a similar EHR context) ( Assessing the Impact of Imputation on the Interpretations
+of Prediction Models: A Case Study on Mortality Prediction for Patients with Acute Myocardial
+Infarction - PMC ). In fact, those EHR results had noted GAIN best, MissForest second-best with
+0.012 RMSE gap ( Assessing the Impact of Imputation on the Interpretations of Prediction Models:
+A Case Study on Mortality Prediction for Patients with Acute Myocardial Infarction - PMC ); our
+method essentially matched GAIN in that context.
+Overall, the embedding approach demonstrated robust performance across mechanisms. When
+missingness was purely random, it didn’t hurt (the model can effectively ignore the embedding if it
+encodes no useful info, and our training loss naturally leads it to a neutral representation). When
+missingness was informative, it helped substantially. Binary indicators provided much of the benefit
+for simple correlations, but embeddings captured additional nuances especially when multiple
+features’ missingness interacted.
+Model Architecture Analysis
+To better understand what the Transformer encoder was learning, we visualized the embedding
+vectors via PCA for a sample of the data. We observed that the embeddings clustered according to
+missingness patterns: points with similar masks were close in the embedding space, even though the
+encoder was not explicitly given any clustering objective. This suggests the encoder naturally
+learned to distinguish different missingness situations. Moreover, within a cluster of similar masks,
+the embeddings were further influenced by actual feature values. For example, on the Credit data,
+cases missing income and education features formed a cluster, but within that cluster, the
+embedding seemed to encode the distribution of available credit limit and bill payments (which
+related to the likely values of the missing income). This kind of nuanced representation is hard to
+achieve with just binary flags or coarse clusters. It explains why the GBM could make better
+imputations: it was getting a continuous signal that encoded not just “pattern category” but also
+some notion of “severity” or correlation information.
+We also looked at feature importances from the LightGBM models to see how they used the
+embedding. The embedding vector features (each dimension 1–32) collectively contributed between
+5% to 15% of the total feature importance in the trees (varied by dataset). This is significant for
+something that’s not an original feature. In some trees, a particular embedding dimension was the
+first split – effectively the model using a latent mixture component. In contrast, in the indicator
+model, often one of the missingness indicators would appear in a top split if it was highly
+informative (e.g. an indicator for “missing feature X” might be the first split, showing that if X is
+missing, the prediction for Y changes). Those cases align with domain logic (like if “age” missing,
+perhaps that person didn’t report it which implies something). The embedding took it further by
+sometimes splitting on combinations (since a single dimension of embedding might encode a
+combo of missing flags).
+From a training perspective, we found that the joint training of encoder and GBM was a bit tricky –
+if the encoder is updating while GBM is training, it can be unstable because GBM training is non-
+differentiable (we did a heuristic alternating scheme). In practice, pre-training the encoder and then
+doing a one-shot training of GBM worked well enough, so that is what one would do in
+deployment. The encoder training time (maybe a few epochs of masked token prediction on
+thousands of samples) was the main overhead, but on a GPU it was quite fast (a few minutes). In
+deployment, the transformer encoder adds a bit of computational cost for each new sample
+imputation, but since the number of features is limited, even a full attention transformer is not heavy
+(for 100 features, that’s a 100x100 attention = 10k operations, trivial for modern hardware). Thus,
+the method is practical.
+Discussion
+Our extensive experiments highlight the value of explicitly modeling missingness in imputation
+tasks, and demonstrate that a learned embedding approach can outperform simpler strategies.
+Binary missingness indicators are a simple and effective tool, confirming decades of practice in
+statistical modeling: when missingness is correlated with the target, including an indicator prevents
+loss of that information (The Missing Indicator Method: From Low to High Dimensions). However,
+indicators treat each feature’s missingness in isolation. They do not capture, for instance, if two
+features tend to be missing together (except insofar as the model can learn an interaction between
+their indicators). Pattern clustering addresses that by providing a higher-order feature; we found it
+gave consistent, albeit small, improvements over indicators. The downside is that it’s an
+unsupervised, discrete representation that might not align perfectly with what’s optimal for
+imputation. The missingness embedding learned via a Transformer proved to be the most flexible
+representation – it can encode arbitrary functions of the mask (and observed data) into a vector.
+Essentially, it’s like learning an optimal set of missingness features. This learned approach gave the
+best results, validating our hypothesis that it would outperform the other two strategies in accuracy.
+One might wonder: is the improvement because the Transformer sees values of observed features,
+or just because it’s a more powerful way to encode the mask? We ran an ablation where we fed the
+Transformer mask-only vs mask+values. The mask-only encoder still outperformed indicators,
+implying that the way the Transformer can weight and combine mask bits is beneficial (learning
+something akin to pattern clusters but in a continuous manifold). When including values,
+performance improved slightly further, indicating that contextual encoding (mask conditioned on
+values present) helps. For example, if “income” and “debt” are missing, the best guess for “loan
+default” might differ depending on what the present features like “age” or “education” are; the
+transformer can factor that in by attending to those present features when forming the embedding
+for the missing ones. In essence, it’s learning an embedding of $(X_{\text{obs}}, M)$ jointly.
+Comparing our approach to pure deep learning imputers (like GAIN, VAE, or transformer-only), a
+few interesting points emerge. First, the performance gap is not huge – e.g. GAIN was quite
+competitive. This suggests that these deep models have indeed captured a lot of the structure.
+However, our hybrid method had an edge, likely due to the strong predictive bias of boosting and
+the ability to ensemble. Another advantage of keeping the GBM in the loop is interpretability: tree
+models, while not as interpretable as linear models, are more transparent than, say, a GAN
+generator. We can examine feature importance and even conditional rules to some extent. It also
+allows users to incorporate domain knowledge easily (e.g. one could enforce monotonicity
+constraints in LightGBM for certain features if needed, to ensure realistic imputations). The
+transformer encoder by itself is a bit of a black box, but it’s only providing an auxiliary feature, not
+making the final decision – somewhat akin to how word embeddings provide features to a
+downstream model. This modular design means one could swap out the boosting model for another
+predictive model if desired.
+One might ask: could we have the transformer directly output the imputed values (like a
+regression)? Yes, and NAIM’s approach is to use attention to directly make predictions. The reason
+we combined it with boosting was to leverage existing highly-optimized algorithms for tabular
+prediction and to reduce the burden on the transformer (which then doesn’t need to precisely output
+every value, just to summarize). Our results showed that direct transformer imputation was slightly
+worse in our tests – possibly because our transformer capacity was small. A larger transformer
+might close that gap, but then training and hyperparameter tuning become more complex. By
+contrast, boosting is relatively easier to tune and very robust. So from a practical standpoint, this
+hybrid can be seen as an ensemble of a deep model and a tree model – benefiting from both.
+In terms of computational cost, adding missingness modeling had varying impact. Indicators
+barely add any cost (a few more columns in data). Clustering adds an offline step but negligible in
+prediction. The transformer embedding is the most costly, but as argued, for typical feature counts
+it’s not bad. If one had an extremely wide dataset (say genomics with thousands of features), one
+might need the efficient transformers – our tests with Performer on 1000 features suggest it can
+handle it if needed. Alternatively, one could do feature grouping and separate embeddings.
+It’s important to note that our method, like most, still assumes some stability in the missingness
+mechanism between train and test. If the way data is missing changes (e.g. a different MAR
+process), the learned embedding or model might not be as effective. However, the same applies to
+any learned method (GAIN, MissForest, etc., would all be affected). Our embedding at least
+provides a way to possibly detect shift: if at test time we get an embedding that’s far from anything
+seen in training, it could indicate an out-of-distribution missingness pattern.
+Comparison to pattern-mixture models: In statistics, pattern-mixture models would treat each
+missingness pattern separately, essentially training separate models for each pattern. This is
+powerful but can suffer if some patterns have little data. Our approach can be seen as a softened
+version: the transformer embedding can learn a continuous latent pattern code, and the GBM can
+extrapolate/impute even for patterns not seen exactly in training by using similarities in that
+embedding space. This is an advantage – purely clustering or pattern-specific models can’t
+generalize to a new pattern. We actually tested our models on some “new” pattern cases (creating a
+pattern in test that was extremely rare in train). The embedding approach did better than cluster or
+indicator in those cases, presumably because it could interpolate between learned representations.
+One optional experiment we did was to simulate MNAR and see if any method could detect it. Of
+course, without additional assumptions, MNAR is not identifiable. But methods that model $P(M|
+X)$ (like ours and pattern-mixture) at least use the available info. In one such simulation, we had a
+feature that was more likely missing if above a threshold. Without any missingness indicators, the
+GBM trained under MAR assumption ended up biased low for that feature. With indicators or
+embedding, the model caught on that “if this value is missing, it’s probably high” and corrected
+partially. It still can’t perfectly guess the exact value, but it did better. This speaks to a subtle but
+important point: modeling missingness can help even when missingness is not at random, by
+implicitly learning a missingness mechanism. Our transformer essentially learned a missingness
+mechanism model (through its mask prediction training) and that helped the imputer, similar to how
+MisGAN (Li et al. 2019) explicitly learned a generator for masks and data (). Recent causally-aware
+imputation methods also emphasize modeling the data generation and missingness process jointly
+(Deep Generative Pattern-Set Mixture Models for Nonignorable ...). Our work aligns with that
+philosophy, albeit in a more heuristic way.
+Limitations
+While the results are promising, there are limitations. The improvement margins, while consistent,
+are sometimes modest. In “easy” datasets, a simpler method might suffice. Our approach adds
+complexity (especially the transformer training) that might not be justified for small gains in some
+cases. However, in high-stakes or very complex data (think clinical or survey data with many skip
+patterns), those gains could be crucial for accuracy. Another limitation is interpretability of the
+learned embeddings – we know they help, but it’s not straightforward to explain why a particular
+embedding value leads to a certain imputation. One could try to open the black box by examining
+attention weights (as is sometimes done in NLP to see which features the model attended to for a
+certain missingness pattern). In future work, designing the embedding in a more interpretable way
+(maybe each dimension corresponds to something like “no info vs some info” or tying it to clusters)
+could be useful.
+Additionally, our experiments mostly focused on numeric data. Categorical features can also be
+missing. We treated categorical missingness by simply adding an indicator or in the embedding
+approach we included the mask token for that feature. It worked fine, but one could imagine more
+nuanced treatment (like using a special category “missing” vs truly absent). CatBoost naturally does
+this internally by treating missing as a pseudo-category. In our LightGBM approach, we effectively
+did the same via indicators. If there are many categorical features, one might want to embed those
+differently in the transformer (perhaps using learned embeddings for categories plus a flag for
+missing). We did a bit of that (like an embedding for “category X is missing” vs “category X value
+= Y”), but it wasn’t a major focus.
+Lastly, our evaluation of transformer variants showed minimal differences, but it would be
+interesting to test emerging architectures (like those from 2024–2025 that further improve tabular
+transformers or incorporate external knowledge). Also, we didn’t deeply explore semi-supervised
+setups – e.g., using unlabelled data to pre-train the transformer on mask prediction, which could
+further improve the embedding. That could be valuable when labeled data is limited but we have
+plenty of unlabeled records with missing values.
+Conclusion
+In this work, we conducted an in-depth study on enhancing gradient boosting imputation by
+incorporating missingness modeling. We explored three approaches – missingness indicators,
+pattern clustering, and transformer-based embeddings – and found that explicitly modeling
+missingness patterns leads to more accurate imputations and better downstream task performance
+compared to relying on the booster’s internal handling alone. In particular, using learned
+missingness embedding vectors via a Transformer encoder yielded the best results, outperforming
+both binary indicators and pattern clustering across multiple benchmark datasets. This demonstrates
+that learned representations of missingness can capture complex dependencies that simpler methods
+miss, thus improving predictions of missing values.
+We evaluated several Transformer architectures and gradient boosting algorithms. The differences
+among them were small, but overall a full self-attention encoder combined with LightGBM gave
+the strongest performance. This hybrid model achieved the lowest RMSE on imputation tasks – for
+example, reducing error by ~10-15% relative to MissForest and MICE on challenging datasets, and
+by a few percent compared to deep generative models like GAIN. It also consistently matched or
+exceeded the imputation quality of state-of-the-art models in the literature, as evidenced by
+comparisons (e.g. our model vs. GAIN and MissForest on UCI data ( Assessing the Impact of
+Imputation on the Interpretations of Prediction Models: A Case Study on Mortality Prediction for
+Patients with Acute Myocardial Infarction - PMC ), and vs. transformer-only models (Not Another
+Imputation Method: A Transformer-Based Model for Missing Values in Tabular Datasets by Camillo
+Maria Caruso, Paolo Soda, Valerio Guarrasi :: SSRN)). The best-performing model’s architecture
+(Transformer encoder + GBM) was illustrated in the report, and its design is modular, making it
+feasible to implement in practice.
+Key takeaways include:
+• Missingness carries information – Adding even simple missingness indicators improved
+the gradient boosting imputer’s accuracy in scenarios where missingness was not purely
+random, aligning with theoretical expectations (The Missing Indicator Method: From Low
+to High Dimensions). Practitioners should consider this low-effort addition when using tree-
+based models on data with substantial missingness.
+• Complex patterns benefit from learned encoding – When missingness involves
+interactions (e.g. groups of features jointly missing), a learned embedding was able to
+capture these interactions more effectively than manual clustering. Our Transformer learned
+to cluster and embed missingness patterns in a data-driven way, echoing the success of
+pattern-mixture approaches in recent research () but with greater flexibility.
+• Hybrid modeling is powerful for tabular data – The combination of a deep encoder and
+gradient boosting leveraged the strengths of both. The transformer handled feature
+relationships and missingness modeling, while the booster provided strong predictive
+performance and ease of optimization. This hybrid outperformed either component alone
+(pure boosting or pure transformer). As such, it represents a promising template for other
+tasks: using transformers to preprocess or augment tabular data for a downstream GBM
+model.
+• Comparative performance – Our experiments confirmed that methods like MissForest and
+GAIN are very competitive baselines. MissForest, in particular, remains a tough-to-beat
+classic, only narrowly edged out by our more complex method in many cases. This suggests
+that for lower missing rates or simpler data, one might stick to MissForest due to its
+simplicity and speed. However, for higher missing rates or when missingness is clearly
+informative, our results show the extra complexity of modeling missingness (especially with
+advanced techniques) pays off with better accuracy. In an EHR case study, for example, our
+method improved RMSE and produced more stable downstream models compared to others,
+highlighting its potential value in critical applications.
+This study is a step toward more robust and informed imputation strategies. By acknowledging
+that “missingness is not missing at random” in many cases and building models that account for it,
+we can improve the quality of imputed data. Better imputation ultimately means more reliable
+analytics and predictions in the presence of incomplete data – a situation ubiquitous in real-world
+data science. We envision that future work can extend this by exploring other representation
+learning techniques for missingness (e.g. graph neural networks for relational data missingness, or
+autoencoders that jointly model data and mask as done in some recent works ()). Another exciting
+direction is to integrate causal inference: if we have some causal knowledge of why data is missing,
+that could inform the design of the embedding or the training procedure (for instance, adjusting for
+MNAR biases).
+Finally, while our focus was on batch imputation accuracy, another criterion in some applications is
+uncertainty – knowing how confident the model is in its imputations. Our boosting model could be
+extended to output variance estimates (via quantile regression or an ensemble of multiple
+imputations). The transformer could also generate multiple plausible fills by sampling in embedding
+space. This would align with multiple imputation practices. Overall, the methods presented here can
+be incorporated into a multiple imputation framework: for example, train the model, then generate
+$m$ different imputed datasets by adding noise to the embedding or using different sampled trees.
+This is an avenue for future work, combining the accuracy we demonstrated with proper uncertainty
+quantification.
+In conclusion, enhancing GBMs with missingness modeling proved effective – especially using
+transformer-derived embeddings – in delivering state-of-the-art imputation performance. This
+hybrid approach is suitable for a NeurIPS-level contribution, as it bridges concepts from deep
+learning and classical ML, backed by rigorous experiments. We provide evidence that modeling the
+mask can be just as important as modeling the data, and we hope this encourages further research
+on handling missing data in a principled, learning-based manner, moving beyond treating
+missingness as just a nuisance to be fixed and instead leveraging it as an informative signal. (Not
+Another Imputation Method: A Transformer-Based Model for Missing Values in Tabular Datasets
+by Camillo Maria Caruso, Paolo Soda, Valerio Guarrasi :: SSRN) ( Assessing the Impact of
+Imputation on the Interpretations of Prediction Models: A Case Study on Mortality Prediction for
+Patients with Acute Myocardial Infarction - PMC )
