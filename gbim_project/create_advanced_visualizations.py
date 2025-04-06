@@ -188,37 +188,42 @@ def plot_radar_chart():
     plt.close()
 
 def plot_heatmap_grid():
-    """Create heatmap grid of embedding vs boosting models across metrics"""
+    """Create heatmap grid of embedding vs boosting models across different dropout rates"""
     results, _ = load_simulation_results()
     
-    # Filter to 30% missingness for this visualization
-    filtered_results = results[(results['Missingness_Rate'] == 30) & (results['Mechanism'] == 'MCAR')]
+    # Filter to MCAR mechanism only for clarity
+    filtered_results = results[results['Mechanism'] == 'MCAR']
     
-    # Create pivot tables for metrics
-    rmse_pivot = filtered_results.pivot_table(values='RMSE', index='Embedding', columns='Boosting')
-    r2_pivot = filtered_results.pivot_table(values='R2', index='Embedding', columns='Boosting')
-    runtime_pivot = filtered_results.pivot_table(values='Runtime', index='Embedding', columns='Boosting')
+    # Create a figure with subplots for each missingness rate
+    missingness_rates = [10, 30, 50]
+    fig, axes = plt.subplots(len(missingness_rates), 3, figsize=(22, 15))
     
-    # Create a figure with 3 subplots
-    fig, axes = plt.subplots(1, 3, figsize=(22, 6))
-    
-    # RMSE Heatmap (lower is better)
-    sns.heatmap(rmse_pivot, ax=axes[0], annot=True, fmt='.3f', cmap='viridis_r', 
-                linewidths=0.5, center=rmse_pivot.values.mean())
-    axes[0].set_title('Imputation Error (RMSE)\nLower is better', fontweight='bold')
-    
-    # R2 Heatmap (higher is better)
-    sns.heatmap(r2_pivot, ax=axes[1], annot=True, fmt='.3f', cmap='viridis', 
-                linewidths=0.5)
-    axes[1].set_title('Downstream Performance (R²)\nHigher is better', fontweight='bold')
-    
-    # Runtime Heatmap (lower is better)
-    sns.heatmap(runtime_pivot, ax=axes[2], annot=True, fmt='.2f', cmap='viridis_r', 
-                linewidths=0.5)
-    axes[2].set_title('Runtime (seconds)\nLower is better', fontweight='bold')
+    for i, rate in enumerate(missingness_rates):
+        # Filter to the current missingness rate
+        rate_results = filtered_results[filtered_results['Missingness_Rate'] == rate]
+        
+        # Create pivot tables for metrics
+        rmse_pivot = rate_results.pivot_table(values='RMSE', index='Embedding', columns='Boosting')
+        r2_pivot = rate_results.pivot_table(values='R2', index='Embedding', columns='Boosting')
+        runtime_pivot = rate_results.pivot_table(values='Runtime', index='Embedding', columns='Boosting')
+        
+        # RMSE Heatmap (lower is better)
+        sns.heatmap(rmse_pivot, ax=axes[i, 0], annot=True, fmt='.3f', cmap='viridis_r', 
+                    linewidths=0.5, center=rmse_pivot.values.mean())
+        axes[i, 0].set_title(f'{rate}% Missingness - RMSE\nLower is better', fontweight='bold')
+        
+        # R2 Heatmap (higher is better)
+        sns.heatmap(r2_pivot, ax=axes[i, 1], annot=True, fmt='.3f', cmap='viridis', 
+                    linewidths=0.5)
+        axes[i, 1].set_title(f'{rate}% Missingness - R²\nHigher is better', fontweight='bold')
+        
+        # Runtime Heatmap (lower is better)
+        sns.heatmap(runtime_pivot, ax=axes[i, 2], annot=True, fmt='.2f', cmap='viridis_r', 
+                    linewidths=0.5)
+        axes[i, 2].set_title(f'{rate}% Missingness - Runtime\nLower is better', fontweight='bold')
     
     plt.tight_layout()
-    plt.savefig('/home/blvksh33p/Documents/eGBIM/eGBIM/gbim_project/figures/advanced/heatmap_grid.png', dpi=300, bbox_inches='tight')
+    plt.savefig('/home/blvksh33p/Documents/eGBIM/eGBIM/gbim_project/figures/advanced/heatmap_grid_by_dropout.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def plot_performance_effect_size():
@@ -280,7 +285,7 @@ def plot_performance_effect_size():
     plt.close()
 
 def plot_mechanism_comparison():
-    """Create violin plots comparing performance across missingness mechanisms"""
+    """Create boxplots comparing performance across missingness mechanisms"""
     results, _ = load_simulation_results()
     
     # Filter to relevant data for clarity
@@ -289,9 +294,9 @@ def plot_mechanism_comparison():
     fig, axes = plt.subplots(1, 2, figsize=(18, 8))
     
     # Plot for RMSE
-    sns.violinplot(x='Embedding', y='RMSE', hue='Mechanism', 
-                  data=filtered_results, palette='Set2', split=True,
-                  inner='quartile', ax=axes[0])
+    sns.boxplot(x='Embedding', y='RMSE', hue='Mechanism', 
+                data=filtered_results, palette='Set2',
+                ax=axes[0])
     
     axes[0].set_title('Imputation Error by Missingness Mechanism', fontweight='bold')
     axes[0].set_xlabel('Embedding Approach')
@@ -299,9 +304,9 @@ def plot_mechanism_comparison():
     axes[0].legend(title='Mechanism')
     
     # Plot for R2
-    sns.violinplot(x='Embedding', y='R2', hue='Mechanism', 
-                  data=filtered_results, palette='Set2', split=True,
-                  inner='quartile', ax=axes[1])
+    sns.boxplot(x='Embedding', y='R2', hue='Mechanism', 
+                data=filtered_results, palette='Set2',
+                ax=axes[1])
     
     axes[1].set_title('Downstream Performance by Missingness Mechanism', fontweight='bold')
     axes[1].set_xlabel('Embedding Approach')
@@ -309,7 +314,7 @@ def plot_mechanism_comparison():
     axes[1].legend(title='Mechanism')
     
     plt.tight_layout()
-    plt.savefig('/home/blvksh33p/Documents/eGBIM/eGBIM/gbim_project/figures/advanced/mechanism_comparison_violin.png', dpi=300, bbox_inches='tight')
+    plt.savefig('/home/blvksh33p/Documents/eGBIM/eGBIM/gbim_project/figures/advanced/mechanism_comparison_boxplot.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def plot_runtime_vs_performance():
@@ -734,7 +739,7 @@ def plot_performance_over_missingness_mechanisms():
     fig, axes = plt.subplots(2, 3, figsize=(20, 12), sharey='row')
     
     # Define key embedding approaches to compare
-    key_models = ['Standard', 'Indicators', 'Pattern Cluster', 'BERT']
+    key_models = ['Standard', 'Indicators', 'Pattern Cluster', 'BERT', 'Linformer', 'Performer']
     
     # Define missingness mechanisms
     mechanisms = ['MCAR', 'MAR', 'MNAR']
@@ -822,7 +827,7 @@ def main():
     print("✓ Created effect size plots")
     
     plot_mechanism_comparison()
-    print("✓ Created mechanism comparison plots")
+    print("✓ Created mechanism comparison boxplots")
     
     plot_runtime_vs_performance()
     print("✓ Created runtime vs performance scatter")
